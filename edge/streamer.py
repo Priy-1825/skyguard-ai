@@ -1,80 +1,60 @@
-import asyncio
-import json
+import time
+import requests
 import random
-from datetime import datetime, timezone
-import websockets
+from datetime import datetime, timezone, timedelta
 
-class VirtualWeatherStation:
-    def __init__(self):
-        self.temp = 35.0
-        self.pressure = 1005.0
-        self.humidity = 50.0
-        self.fault_state = "NORMAL"
-        self.drift_counter = 0
+API_URL = "http://127.0.0.1:8000/ingest"
+STATIONS = [str(s) for s in range(1, 10)]
 
-    def get_normal_reading(self):
-        self.temp += random.uniform(-0.1, 0.1)
-        self.pressure += random.uniform(-0.5, 0.5)
-        self.humidity += random.uniform(-0.5, 0.5)
-        self.humidity = max(0, min(100, self.humidity))
-        return self.temp, self.pressure, self.humidity
+def generate_values():
+    values = {}
+    for s in STATIONS:
+        values[f"{s}_temp_c"] = 35.0 + random.uniform(-1, 1)
+        values[f"{s}_pressure_hpa"] = 1005.0 + random.uniform(-2, 2)
+        values[f"{s}_rh_pct"] = 50.0 + random.uniform(-5, 5)
+    return values
 
-    def apply_fault(self, t, p, h):
-        if self.fault_state == "SPIKE":
-            t = 55.0
-            self.fault_state = "NORMAL"
-        elif self.fault_state == "DRIFT":
-            self.drift_counter += 1
-            t += (0.5 * self.drift_counter)
-        elif self.fault_state == "FROZEN":
-            p = 1013.25
-        return t, p, h
+print("Warming up API buffer (needs 24 ticks)...")
+base_time = datetime.now(timezone.utc) - timedelta(hours=25)
 
-    def generate_payload(self):
-        t, p, h = self.get_normal_reading()
-        t, p, h = self.apply_fault(t, p, h)
-        return {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "sensor_id": "AWS-ESP32-001",
-            "telemetry": {
-                "temperature_c": round(t, 2),
-                "pressure_hpa": round(p, 2),
-                "humidity_percent": round(h, 2)
-            },
-            "status": "active"
-        }
-async def stream_telemetry():
-    uri = "ws://127.0.0.1:8000/ws/telemetry"
-    station = VirtualWeatherStation()
+# 1. Send 24 quick historical ticks to fill the sequence buffer
+for i in range(1, 26):
+    payload = {
+        "timestamp": (base_time + timedelta(hours=i)).isoformat(),
+        "values": generate_values()
+    }
+    requests.post(API_URL, json=payload)
+    print(f"Sent warm-up tick {i}")
+
+print("\nStarting live 9-station stream...")
+tick = 25
+
+# 2. Stream live data every second
+while True:
+    tick += 1
+    values = generate_values()
     
-    while True:
-        try:
-            print(f"Connecting to SkyGuard Backend at {uri}...")
-            # ping_interval=None prevents client-side heartbeat timeouts during continuous push
-            async with websockets.connect(uri, ping_interval=None, ping_timeout=None) as websocket:
-                print("Connected! Streaming telemetry every 1s...")
-                tick = 0
-                while True:
-                    tick += 1
-                    
-                    if tick == 5:
-                        print("\n[!] Injecting Fault: 55°C Spike")
-                        station.fault_state = "SPIKE"
-                    elif tick == 10:
-                        print("\n[!] Injecting Fault: Sensor Drift Started")
-                        station.fault_state = "DRIFT"
-                        
-                    payload = station.generate_payload()
-                    await websocket.send(json.dumps(payload))
-                    print(f"Sent tick {tick}: {payload['telemetry']}")
-                    await asyncio.sleep(1)
-
-        except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError) as e:
-            print(f"Connection dropped ({e}). Reconnecting in 2 seconds...")
-            await asyncio.sleep(2)
-
-if __name__ == "__main__":
+    # Fault Injection: Spike Station 1 temperature
+    if tick == 30:
+        print("\n[!] Injecting Fault: Station 1 temperature spike (60°C)")
+        values["1_temp_c"] = 60.0
+        
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "values": values
+    }
+    
     try:
-        asyncio.run(stream_telemetry())
-    except KeyboardInterrupt:
-        print("\nStreamer stopped.")
+        response = requests.post(API_URL, json=payload)
+        print(f"Sent tick {tick} | HTTP Status: {response.status_code}")
+        
+        # Check if the AI flagged the injected fault
+        if response.status_code == 200:
+            flags = [res for res in response.json() if res["is_anomaly"]]
+            if flags:
+                print(f" ---> AI Flag: {flags[0]['root_cause']} on station {flags[0]['station']}")
+                
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        
+    time.sleep(1)
