@@ -3,7 +3,7 @@ import requests
 import random
 from datetime import datetime, timezone, timedelta
 
-API_URL = "http://127.0.0.1:8000/ingest"
+API_URL = "http://localhost:3000/api/telemetry"
 STATIONS = [str(s) for s in range(1, 10)]
 
 def generate_values():
@@ -48,13 +48,13 @@ while True:
         response = requests.post(API_URL, json=payload)
         print(f"Sent tick {tick} | HTTP Status: {response.status_code}")
         
-        # Check if the AI flagged the injected fault
-        if response.status_code == 200:
-            flags = [res for res in response.json() if res["is_anomaly"]]
-            if flags:
-                print(f" ---> AI Flag: {flags[0]['root_cause']} on station {flags[0]['station']}")
+        # # Check if the AI flagged the injected fault
+        # if response.status_code == 200:
+        #     flags = [res for res in response.json() if res["is_anomaly"]]
+        #     if flags:
+        #         print(f" ---> AI Flag: {flags[0]['root_cause']} on station {flags[0]['station']}")
                 
     except Exception as e:
         print(f"Connection failed: {e}")
         
-    time.sleep(1)
+    time.sleep(3)
